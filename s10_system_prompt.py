@@ -40,129 +40,57 @@ MEMORY_TYPES = ["user", "feedback", "project", "reference"]
 # ═══════════════════════════════════════════════════════════
 #  NEW in s10: System Prompt Assembly
 # ═══════════════════════════════════════════════════════════
-
-# 提示词片段字典，按主题分类
 PROMPT_SECTIONS = {
-    "identity": "You are a coding agent. Act, don't explain.",           # 身份提示词
-    "tools": "Available tools: bash, read_file, write_file, edit_file, glob, todo_write, task, load_skill, compact.",  # 工具提示词
-    "workspace": f"Working directory: {WORKDIR}",                         # 工作区提示词
-    "memory": "Relevant memories are injected below when available.",     # 内存提示词
+    "identity": "You are a coding agent. Act, don't explain.",
+    "tools": "Available tools: bash, read_file, write_file, edit_file, glob, todo_write, task, load_skill, compact.",
+    "workspace": f"Working directory: {WORKDIR}",
+    "memory": "Relevant memories are injected below when available.",
 }
 
-# 缓存变量
-_last_context_key = None  # 上次的上下文键（用于缓存判断）
-_last_prompt = None       # 上次的提示词（缓存值）
+_last_context_key = None
+_last_prompt = None
 
 def assemble_system_prompt(context: dict) -> str:
-    """根据当前上下文选择并组装提示词片段。
+    sections = []
+    sections.append(PROMPT_SECTIONS["indentity"])
+    sections.append(PROMPT_SECTIONS["tools"])
+    sections.append(PROMPT_SECTIONS["workspace"])
 
-    参数:
-        context: 上下文字典，包含 enabled_tools, workspace, memories 等
+    # 条件加载
+    memories = context.get("memories", "")
+    if memories:
+        sections.append(f"Relevant memoriees:\n{memories}")
+    return "\n\n".join(sections)
 
-    返回:
-        组装后的系统提示词字符串
-
-    执行流程:
-        1. 总是加载：identity, tools, workspace
-        2. 条件加载：当 memories 存在时加载内存部分
-        3. 合并所有部分并返回
-    """
-    sections = []  # 创建空列表，用于存储提示词片段
-
-    # ── 总是加载的部分 ──
-    sections.append(PROMPT_SECTIONS["identity"])   # 添加身份提示词
-    sections.append(PROMPT_SECTIONS["tools"])      # 添加工具提示词
-    sections.append(PROMPT_SECTIONS["workspace"])  # 添加工作区提示词
-
-    # ── 条件加载的部分 ──
-    memories = context.get("memories", "")  # 从上下文获取内存内容
-    if memories:  # 如果有内存内容
-        sections.append(f"Relevant memories:\n{memories}")  # 添加内存提示词
-
-    # ── 合并所有部分 ──
-    return "\n\n".join(sections)  # 用双换行符连接所有部分
-
-def get_system_prompt(context: dict) -> str:
-    """带缓存的提示词组装。
-
-    参数:
-        context: 上下文字典
-
-    返回:
-        系统提示词字符串
-
-    缓存机制:
-        1. 用 json.dumps 生成上下文的确定性键
-        2. 如果键与上次相同，直接返回缓存的提示词
-        3. 如果键不同，重新组装并更新缓存
-
-    为什么用 json.dumps 而不是 hash()？
-        - hash() 有进程随机化，不同进程的 hash 值不同
-        - hash() 对嵌套的 dict/list 会失败
-        - json.dumps 是确定性的，相同输入总是相同输出
-    """
-    global _last_context_key, _last_prompt  # 使用全局变量
-
-    # ── 生成上下文键 ──
-    # sort_keys=True: 确保字典键的顺序一致
-    # ensure_ascii=False: 允许非 ASCII 字符（如中文）
-    # default=str: 处理不能序列化的对象（如 Path）
+def assemble_system_prompt(context: dict) -> str:
+    global _last_context_key, _last_prompt
     key = json.dumps(context, sort_keys=True, ensure_ascii=False, default=str)
 
-    # ── 检查缓存 ──
-    if key == _last_context_key and _last_prompt:  # 如果键相同且有缓存
-        print("  \033[90m[cache hit] system prompt unchanged\033[0m")  # 打印缓存命中
-        return _last_prompt  # 返回缓存的提示词
+    if key == _last_context_key and _last_prompt: 
+        print(" cache hit system prompt unchanged")  # 打印缓存命中
+        return _last_prompt 
+    _last_context_key = key 
+    _last_prompt = assemble_system_prompt(context)
 
-    # ── 缓存未命中，重新组装 ──
-    _last_context_key = key  # 更新缓存键
-    _last_prompt = assemble_system_prompt(context)  # 重新组装提示词
+    loaded = ["identity", "tools", "workspace"]
+    if context.get("memories"):
+        loaded.append("memory")
+    print(f"assembled sections {',',join(loaded)}")
 
-    # ── 打印已加载的部分（调试用）──
-    loaded = ["identity", "tools", "workspace"]  # 总是加载的部分
-    if context.get("memories"):  # 如果有内存
-        loaded.append("memory")  # 添加到已加载列表
-    print(f"  \033[32m[assembled] sections: {', '.join(loaded)}\033[0m")  # 打印已加载的部分
+    return _last_prompt
 
-    return _last_prompt  # 返回提示词
 
-def update_context(context: dict, messages: list) -> dict:
-    """从实际状态派生上下文。
-
-    参数:
-        context: 上下文字典（可选）
-        messages: 消息列表（可选）
-
-    返回:
-        新的上下文字典
-
-    检查的实际状态:
-        1. .memory/MEMORY.md 是否存在且有内容
-        2. 有哪些工具可用
-        3. 工作区是什么
-
-    好处:
-        - 基于真实状态，不是硬编码
-        - 每次调用都检查最新状态
-        - 条件加载：只加载存在的内容
-    """
-    # ── 检查内存 ──
-    memories = ""  # 创建空字符串
-    if MEMORY_INDEX.exists():  # 如果内存索引文件存在
-        content = MEMORY_INDEX.read_text().strip()  # 读取内容
-        if content:  # 如果有内容
-            memories = content  # 设置内存内容
-
-    # ── 返回上下文 ──
+def update_context(context: dict, message: list) -> dict:
+    memories = ""
+    if MEMORY_INDEX.exists():
+        content = MEMORY_INDEX.read_text().strip()
+        if content:
+            memories = content
     return {
-        "enabled_tools": list(TOOL_HANDLERS.keys()),  # 已启用的工具列表
-        "workspace": str(WORKDIR),                    # 工作区路径
-        "memories": memories,                         # 内存内容
+        "enabled_tools": list(TOOL_HANDLERS.keys()),
+        "workspace": str(WORKDIR),
+        "memories": memories,
     }
-
-
-
-
 
 # ═══════════════════════════════════════════════════════════
 #  NEW in s09: Memory System Core Functions
@@ -891,32 +819,18 @@ register_hook("Stop", summary_hook)
 
 
 # ═══════════════════════════════════════════════════════════
-#  agent_loop — s10: 使用动态组装的系统提示词
+#  agent_loop — s09: inject memories + extract after each turn
 # ═══════════════════════════════════════════════════════════
 
-MAX_REACTIVE_RETRIES = 1  # 紧急压缩重试次数
+MAX_REACTIVE_RETRIES = 1
 
-def agent_loop(messages: list, context: dict):
-    """主循环 — 使用动态组装的系统提示词，而不是硬编码的 SYSTEM。
-
-    参数:
-        messages: 消息列表
-        context: 上下文字典
-
-    执行流程:
-        1. 获取系统提示词（带缓存）
-        2. 压缩管道
-        3. 调用 LLM
-        4. 执行工具（如果需要）
-        5. 更新上下文和提示词
-        6. 循环继续
-    """
-    # s10: 使用动态组装的系统提示词
-    system = get_system_prompt(context)
-
+def agent_loop(messages: list):
+    reactive_retries = 0
     # s09: 加载相关内存
     memories_content = load_memories(messages)
     memory_turn = len(messages) - 1 if messages and isinstance(messages[-1].get("content"), str) else None
+    # s09: 构建 SYSTEM 提示词
+    system = build_system()
 
     while True:
         # s09: 保存压缩前的快照（用于准确的内存提取）
@@ -979,25 +893,19 @@ def agent_loop(messages: list, context: dict):
 
 
 if __name__ == "__main__":
-    print("s10: System Prompt — runtime assembly with caching")
+    print("s09: Memory — persistent cross-session knowledge")
     print("输入问题，回车发送。输入 q 退出。\n")
 
     history = []
-    # s10: 初始化上下文
-    context = update_context({}, [])
-
     while True:
         try:
-            query = input("\033[36ms10 >> \033[0m")
+            query = input("\033[36ms09 >> \033[0m")
         except (EOFError, KeyboardInterrupt):
             break
         if query.strip().lower() in ("q", "exit", ""):
             break
         history.append({"role": "user", "content": query})
-        # s10: 传入上下文
-        agent_loop(history, context)
-        # s10: 更新上下文
-        context = update_context(context, history)
+        agent_loop(history)
         for block in history[-1]["content"]:
             if getattr(block, "type", None) == "text":
                 print(block.text)
