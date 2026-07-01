@@ -1,40 +1,22 @@
 #!/usr/bin/env python3
-"""
-s10: System Prompt — Runtime prompt assembly with caching.
 
-核心思想：根据实际情况动态组装 SYSTEM 提示词，而不是硬编码
 
-PROMPT_SECTIONS = {
-    "identity": "You are a coding agent...",    # 身份
-    "tools": "Available tools: bash, ...",      # 工具
-    "workspace": f"Working directory: {WORKDIR}", # 工作区
-    "memory": "Relevant memories...",            # 内存
-}
-
-assemble_system_prompt(context) → 根据 context 组装提示词
-get_system_prompt(context) → 带缓存的组装
-update_context(context, messages) → 从实际状态派生上下文
-
-Changes from s09:
-  + PROMPT_SECTIONS — 提示词片段字典
-  + assemble_system_prompt() — 根据上下文动态组装
-  + get_system_prompt() — 带缓存的组装
-  + update_context() — 从实际状态派生上下文
-  + agent_loop() 使用 get_system_prompt(context) 而不是硬编码
-
-Run: python s10_system_prompt.py
-Needs: pip install anthropic python-dotenv + ANTHROPIC_API_KEY in .env
-"""
-
+import random
 import os, subprocess, json, time, re
 from pathlib import Path
 import yaml
+
+from dataclasses import dataclass, asdict
 
 CONTEXT_LIMIT = 50000
 KEEP_RECENT = 3
 PERSIST_THRESHOLD = 3000
 
 MEMORY_TYPES = ["user", "feedback", "project", "reference"]
+
+
+
+
 
 
 # ═══════════════════════════════════════════════════════════
@@ -62,7 +44,7 @@ def assemble_system_prompt(context: dict) -> str:
         sections.append(f"Relevant memoriees:\n{memories}")
     return "\n\n".join(sections)
 
-def get_system_prompt(context: dict) -> str:
+def assemble_system_prompt(context: dict) -> str:
     global _last_context_key, _last_prompt
     key = json.dumps(context, sort_keys=True, ensure_ascii=False, default=str)
 
@@ -821,6 +803,100 @@ register_hook("Stop", summary_hook)
 # ═══════════════════════════════════════════════════════════
 #  agent_loop — s09: inject memories + extract after each turn
 # ═══════════════════════════════════════════════════════════
+
+
+
+TASKS_DIR = WORKDIR / ".tasks"
+TASKS_DIR.mkdir(exist_ok=True)
+
+
+@dataclass
+class Task:
+    id: str
+    subject: str
+    description: str
+    status: str
+    owner: str | None
+    blockedBy: list[str]
+
+def _task_path(task_id: str) -> Path:
+    return TASKS_DIR / f"{task_id}.json"
+
+def create_task(subject: str, description: str ="",
+                blockedBy: list[str] | None = None) -> Task:
+    task = Task(
+        id = f"task_{int(time.time())}_{random.randint(0,9999):04d}",
+        subject=subject,
+        description=description,
+        status="pending",
+        owner=None,
+        blockedBy=blockedBy or []
+    )
+    save_task(task)
+    return task
+def save_task(task: Task):
+    _task_path(task.id).write_text(json.dumps(asdict(task), indent=2))
+
+def load_task(task_id: str) -> Task:
+    return Task(**json.loads(_task_path(task_id).read_text()))
+
+def list_tasks() -> list[Task]:
+    return [Task(**json.loads(p.read_text()))
+            for p in sorted(TASKS_DIR.glob("task_*,json"))]
+
+def get_task(task_id: str) -> str:
+    task = load_task(task_id)
+    return json.dumps(asdict(task), indent = 2)
+
+
+def can_start(task_id: str)-> bool:
+    task = load_task(task_id)
+    for dep_id in task.blockedBy:
+        if not _task_path(dep_id).exists():
+            return False
+        if load_task(dep_id).status != "completed":
+            return False
+    return True
+
+
+def claim_task(task_id: str, owner: str= "agent") -> str:
+    task = load_task(task_id)
+    if task.status != "pending":
+        return f"Task {task_id} is {task.status}, cannot claim"
+    if not can_start(task_id):
+        deps = [d for d in task.blockedBy
+                if not _task_path(d).exists() or load_task(d).status != "completed"]
+        return f"Blocked by : {deps}"
+    task.owner = owner
+    task.status = "in_progress"
+    save_task(task)
+    print(f"  \033[36m[claim] {task.subject} → in_progress (owner: {owner})\033[0m")
+    return f"Claimed {task.id} ({task.subject})"
+
+
+def complete_task(task_id: str) -> str:
+    task = load_task(task_id)
+    if task.status != "in_progress":
+        return f"Task {task_id} is {task.status}, cannot complete"
+    task.status = "complete"
+    save_task(task)
+    unblocked = [t.subject for t in list_tasks()
+                 if t.status == "pending" and t.blockedBy and can_start(t.id)]
+    print(f"  \033[32m[complete] {task.subject} ✓\033[0m")
+    msg = f"Completed {task.id} ({task.subject})"
+    if unblocked:
+        msg += f"\nUnblocked: {', '.join(unblocked)}"
+        print(f"  \033[33m[unblocked] {', '.join(unblocked)}\033[0m")
+    return msg
+
+
+
+
+
+
+
+
+
 
 MAX_REACTIVE_RETRIES = 1
 
