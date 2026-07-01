@@ -30,40 +30,6 @@ import ast, json, os, subprocess
 from pathlib import Path
 import yaml
 
-
-CONTEXT_LIMIT = 50000
-KEEP_RECENT: 3
-PERSIST_THRESHOLD: 3000
-
-
-
-
-def estimate_size(msgs):
-    return len(str(msgs))
-
-def _block_type(block):
-    return block.get("type") if isinstance(block, dict) else getattr(block, "type", None)
-
-def _message_has_tool_use(msg):
-    if msg.got("role") != "assistant":
-        return False
-    content = msg.get("content")
-    if not isinstance(content, list):
-        return False
-    return any(_block_type(block) == "tool_use" for block in content)
-
-
-def _is_tool_result_message(msg):
-    if msg.get("role") != "user":
-        return False
-    content = msg.get("content")
-    if not isinstance(content, list):
-        return False
-    return any(isinstance(block,dict) and block.get("type") == "tool_result" for block in content)
-
-    
-
-
 try:
     import readline
     readline.parse_and_bind('set bind-tty-special-chars off')
